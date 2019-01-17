@@ -1,0 +1,288 @@
+<style type="text/css">
+
+.main-container {
+  max-width: 1600px;
+}
+
+</style>
+
+
+
+
+---
+title: "Key file for PheMU images (AM Panel)"
+author: "Jesse Poland"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output: html_document
+---
+
+
+#KEY FILES FOR 17ASH AM PANEL
+
+CODE TO QUERY THE DATABASE.
+
+2017 AM PANEL 
+plot numbers: 17ASH1####
+
+
+
+```{r set-options, echo=FALSE, cache=FALSE}
+options(width = 1000)
+```
+
+
+
+```{r query-db, eval=TRUE}
+
+## clear workspace ##
+rm(list=ls())
+
+
+require(RMySQL) #load required packages may need to install.packages("RMySQL") dependicies are DBI packaage as well
+
+
+#Make a MySQL connection to beocat
+wheatgeneticsDB=dbConnect(MySQL(),user='jpoland', dbname='wheatgenetics', host='beocat.cis.ksu.edu', password='oko*I*98789', port=6306) 
+
+## set the trait ##
+trait = "'PCTHEAD'"
+
+#phenotypic data query
+pheno.query = paste("select phenotype.* from phenotype where phenotype.entity_id LIKE '17ASH1%' AND trait_id =", trait, sep="")
+pheno=dbGetQuery(wheatgeneticsDB, pheno.query)
+head(pheno)
+
+## plot data query
+plot.query = paste("select plot.* from plot where plot.plot_id LIKE '17ASH1%'", sep="")
+plot = dbGetQuery(wheatgeneticsDB, plot.query)
+head(plot)
+
+## query of image datasets
+image.query = 
+"SELECT
+phemu_images.image_file_name,
+phemu_images.run_id,
+phemu_images.plot_id,
+phemu_images.camera_sn,
+phemu_images.absolute_sensor_longitude,
+phemu_images.absolute_sensor_latitude,
+phemu_images.sampling_time_utc,
+phemu_images.sampling_date
+FROM
+phemu_images
+WHERE
+phemu_images.plot_id LIKE '17ASH1%'
+"
+
+images = dbGetQuery(wheatgeneticsDB, image.query)
+head(images)
+
+dbDisconnect(wheatgeneticsDB) #disconnect from database
+
+
+```
+
+
+
+```{r make-keys, eval=TRUE}
+## make key file for images paired with visual score
+
+dates.pheno = as.Date(sort(unique(pheno$phenotype_date)))
+dates.image = as.Date(sort(unique(images$sampling_date)))
+
+## sort through imaging dates and match to cloest phenotype dates for PCTHEAD  ## impute missing dates assuming linear trend between scoring dates (weighted average of scoring dates)
+## NOTE: THIS ONLY WORKS FOR IMAGE DATES THAT ARE WITHIN THE RANGE OF PHENOTYPING DATES ##
+##output = NA
+i=9
+for (i in 1:length(dates.image)){
+  
+    if(dates.image[i]<dates.pheno[1]){next}
+    if(dates.image[i]>dates.pheno[length(dates.pheno)]){next}
+  
+    idx = which.min(abs((dates.image[i]-dates.pheno)[which((dates.image[i]-dates.pheno)>=0)])) ## find the closest date before the image date
+    dif = as.numeric(dates.pheno[idx+1]-dates.pheno[idx])
+    
+    print(paste("IMAGE DATE: ", dates.image[i] ))
+    print(paste("PHENO DATE 1: ", dates.pheno[idx]))
+    print(paste("PHENO DATE 2: ", dates.pheno[idx+1]))
+    
+    pheno.imp = merge(pheno[pheno$phenotype_date==dates.pheno[idx],], pheno[pheno$phenotype_date==dates.pheno[idx+1],c("entity_id","phenotype_value")],  by="entity_id")
+    
+    ## make phenotype_value.x as weighted mean between the two phenotype values ##
+    pheno.imp$phenotype_value.x = (as.numeric(pheno.imp$phenotype_value.y)*as.numeric(dates.image[i]-dates.pheno[idx]) + as.numeric(pheno.imp$phenotype_value.x)*as.numeric(dates.pheno[idx+1]-dates.image[i]))/dif
+    
+    ## if scoring on same date, then use only that date 
+    if(dates.image[i]==dates.pheno[idx]) {pheno.imp = merge(pheno[pheno$phenotype_date==dates.pheno[idx],], pheno[pheno$phenotype_date==dates.pheno[idx],c("entity_id","phenotype_value")],  by="entity_id") }
+    
+    pheno.imp$phenotype_value.x = round(as.numeric(pheno.imp$phenotype_value.x), digits=0) ## round to whole numbers
+    
+    colnames(pheno.imp)[colnames(pheno.imp)=="phenotype_value.x"]="PCTHEAD"
+    output = merge(images[images$sampling_date==dates.image[i],], pheno.imp[, c("entity_id","PCTHEAD") ],  by.x="plot_id", by.y="entity_id" )
+    output = merge(output, plot[,c("plot_id","plot_name", "rep")], by="plot_id") ## merge the plot info 
+    output = output[(!is.na(output$plot_id)), ] ## remove some missing plots
+    if(nrow(output)<1){next}
+    
+    out.file = paste("/Users/jpoland/htp/17ASH_AM-PANEL/17ASH_AM-PANEL_KEY_", gsub("'","",trait), "_", gsub("-","",dates.image[i]), ".csv", sep="")
+    write.csv(output, file=out.file, row.names=FALSE, quote=FALSE)
+    
+    print(paste("OUTPUT FILE: ",out.file ))
+    print(paste("TOTAL IMAGES: ", nrow(output)))
+    hist(output$PCTHEAD, main=dates.image[i], xlim=c(0,100), breaks=10)
+
+ 
+}
+
+
+
+
+```
+
+
+
+
+SOME EXTRA CODE FOR IMAGE DATES OUTSIDE OF PHENOTYPING RANGE
+
+```{r extra, eval=TRUE}
+
+## SOME EXTRA CODE FOR IMAGE DATES OUTSIDE OF PHENOTYPING RANGE
+    ## override the input for imaging dates that were outside of the phenotyping range ##
+    ## first date of imaging  ## uses first date of pheno scores
+    i=1
+    output = merge(images[images$sampling_date==dates.image[1],], pheno[pheno$phenotype_date==dates.pheno[1], c("entity_id","phenotype_value") ],  by.x="plot_id", by.y="entity_id" )
+    colnames(output)[colnames(output)=="phenotype_value"]="PCTHEAD"
+    output = merge(output, plot[,c("plot_id","plot_name", "rep")], by="plot_id")
+    output = output[(!is.na(output$plot_id)), ] ## remove some missing plots
+
+    out.file = paste("/Users/jpoland/htp/17ASH_AM-PANEL/17ASH_AM-PANEL_KEY_", gsub("'","",trait), "_", gsub("-","",dates.image[i]), ".csv", sep="")
+    write.csv(output, file=out.file, row.names=FALSE, quote=FALSE)
+    print(paste("OUTPUT FILE: ",out.file ))
+    print(paste("TOTAL IMAGES: ", nrow(output)))
+    hist(as.numeric(output$PCTHEAD), main=dates.image[i], xlim=c(0,100), breaks=10)
+    
+    
+    ## last date ##  set everything that was previously above 50% to 100%; below 50% remove
+    output = merge(images[images$sampling_date==dates.image[length(dates.image)],], pheno[pheno$phenotype_date==dates.pheno[length(dates.pheno)], c("entity_id","phenotype_value") ],  by.x="plot_id", by.y="entity_id" )
+    colnames(output)[colnames(output)=="phenotype_value"]="PCTHEAD"
+    
+    output = merge(output, plot[,c("plot_id","plot_name", "rep")], by="plot_id")
+    output = output[as.numeric(output$PCTHEAD)>50,]
+    output$PCTHEAD=100
+    output = output[(!is.na(output$plot_id)), ] ## remove some missing plots
+   
+    out.file = paste("/Users/jpoland/htp/17ASH_AM-PANEL/17ASH_AM-PANEL_KEY_", gsub("'","",trait), "_", gsub("-","",dates.image[length(dates.image)]), ".csv", sep="")
+    write.csv(output, file=out.file, row.names=FALSE, quote=FALSE)
+    print(paste("OUTPUT FILE: ",out.file ))
+    print(paste("TOTAL IMAGES: ", nrow(output)))
+    hist(output$PCTHEAD, main=dates.image[length(dates.image)], xlim=c(0,100), breaks=10)
+    
+
+```
+
+
+
+
+
+
+## MAKE KEY FILES FOR AWNED/AWNLESS
+
+
+```{r query-db-awns, eval=TRUE}
+## clear workspace ##
+rm(list=ls())
+
+
+require(RMySQL) #load required packages may need to install.packages("RMySQL") dependicies are DBI packaage as well
+
+#Make a MySQL connection to beocat
+wheatgeneticsDB=dbConnect(MySQL(),user='jpoland', dbname='wheatgenetics', host='beocat.cis.ksu.edu', password='oko*I*98789', port=6306) 
+
+## set the trait ##
+trait = "'AWNS'"
+
+#phenotypic data query
+pheno.query = paste("select phenotype.* from phenotype where phenotype.entity_id LIKE '17ASH1%' AND trait_id =", trait, sep="")
+pheno=dbGetQuery(wheatgeneticsDB, pheno.query)
+
+pheno$phenotype_value = sub(" ","", pheno$phenotype_value) ## fix some values that had spaces
+
+pheno$phenotype_value = toupper(pheno$phenotype_value)  ## turn to all upper case
+head(pheno)
+
+
+
+as.factor(pheno$pheno_value)
+
+## plot data query
+plot.query = paste("select plot.* from plot where plot.plot_id LIKE '17ASH1%'", sep="")
+plot = dbGetQuery(wheatgeneticsDB, plot.query)
+head(plot)
+
+## query of image datasets
+image.query = 
+"SELECT
+phemu_images.image_file_name,
+phemu_images.run_id,
+phemu_images.plot_id,
+phemu_images.camera_sn,
+phemu_images.absolute_sensor_longitude,
+phemu_images.absolute_sensor_latitude,
+phemu_images.sampling_time_utc,
+phemu_images.sampling_date
+FROM
+phemu_images
+WHERE
+phemu_images.plot_id LIKE '17ASH1%'
+"
+
+images = dbGetQuery(wheatgeneticsDB, image.query)
+head(images)
+
+dbDisconnect(wheatgeneticsDB) #disconnect from database
+
+
+```
+
+
+
+```{r make-keys-awned, eval=TRUE}
+## make key file for images paired with visual score
+
+## USING ONLY DATES FROM 2017-05-10 and later
+
+dates.pheno = as.Date(sort(unique(pheno$phenotype_date)))
+dates.image = as.Date(sort(unique(images$sampling_date)))
+dates.image = dates.image[dates.image>='2017-05-10'] ## KEEP ONLY DATES FROM 2017-05-10
+
+## sort through imaging dates and match to cloest phenotype dates for AWNS
+i=1
+for (i in 1:length(dates.image)){
+  
+    output = merge(images[images$sampling_date==dates.image[i],], pheno[pheno$phenotype_date==dates.pheno[1], c("entity_id","phenotype_value") ],  by.x="plot_id", by.y="entity_id" )  ## USES ONLY THE FIRST DATE FOR VISAL PHENO
+    colnames(output)[colnames(output)=="phenotype_value"]="AWNS"
+    output = merge(output, plot[,c("plot_id","plot_name", "rep")], by="plot_id")
+    
+    ## filter out images less than 80% headed  ## relies on already running key files for PCTHEAD (above)
+    headed = read.csv(paste("/Users/jpoland/htp/17ASH_AM-PANEL/17ASH_AM-PANEL_KEY_PCTHEAD_", gsub("-","",dates.image[i]), ".csv", sep=""), header=TRUE)
+    output = output[output$image_file_name %in% headed$image_file_name[headed$PCTHEAD>=80], ]
+    
+    out.file = paste("/Users/jpoland/htp/17ASH_AM-PANEL/17ASH_AM-PANEL_KEY_", gsub("'","",trait), "_", gsub("-","",dates.image[i]), ".csv", sep="")
+    write.csv(output, file=out.file, row.names=FALSE, quote=FALSE)
+    
+    print(paste("OUTPUT FILE: ",out.file ))
+    print(paste("TOTAL IMAGES: ", nrow(output)))
+    tbl = with(output, table(AWNS))
+    print(tbl)
+    barplot(tbl, main=dates.image[i])
+
+}
+
+
+
+```
+
+
+
+#Session Information
+```{r sessionInfo}
+sessionInfo()
+```

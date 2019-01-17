@@ -1,0 +1,136 @@
+---
+title: "AM-PANEL_18ASH_htp-analysis"
+author: "Jesse Poland"
+date: "6/13/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+### DATABASE QUERY
+
+```{r database-query, eval=FALSE}
+
+require(RMySQL) #load required packages may need to install.packages("RMySQL") dependicies are DBI packaage as well
+
+## Make a MySQL connection to beocat
+wheatgeneticsDB=dbConnect(MySQL(),user='jpoland', dbname='wheatgenetics', host='beocat.cis.ksu.edu', password='oko*I*98789', port=6306) 
+
+## set the trait ##
+trait = "'AWNS'"
+
+#phenotypic data query
+pheno.query = paste("select phenotype.* from phenotype where (phenotype.entity_id LIKE '18ASH3%') AND trait_id =", trait, sep="")
+pheno=dbGetQuery(wheatgeneticsDB, pheno.query)
+##pheno$phenotype_value = as.numeric(pheno$phenotype_value)
+head(pheno)
+
+unique(pheno$trait_id)
+
+pheno$phenotype_date = as.Date(pheno$phenotype_date) ## set the date as a Date type
+pheno = pheno[!is.na(pheno$phenotype_date), ] ## remove some rows that are missing the phenotype date
+pheno = pheno[order(pheno$entity_id, pheno$phenotype_date), ]  ## sort the rows by plot and date
+head(pheno)
+
+## plot data query
+plot.query = paste("select plot.* from plot where plot.plot_id LIKE '18ASH3%'", sep="")
+plot = dbGetQuery(wheatgeneticsDB, plot.query)
+plot = plot[,c("plot_id","range", "column", "plot_name", "rep", "block")] ## keep only columns of interest
+head(plot)
+
+dbDisconnect(wheatgeneticsDB) #disconnect from database
+
+save(plot, file="/Users/jpoland/htp/18ASH_AM-PANEL/18ASH_AM-PANEL_PLOT.Rd")
+##save(images, file="/Users/jpoland/htp/17ASH_LakinFuller/LakinFuller_images.Rd" )
+save(pheno, file="/Users/jpoland/htp/18ASH_AM-PANEL/18ASH_AM-PANEL_pheno.Rd" )
+
+
+write.csv(plot, file="/Users/jpoland/htp/18ASH_AM-PANEL/18ASH_AM-PANEL_plot.csv", row.names=FALSE)
+##write.csv(images, file="/Users/jpoland/htp/17ASH_LakinFuller/LakinFuller_images.csv", row.names=FALSE)
+##write.csv(pheno, file="/Users/jpoland/htp/17ASH_LakinFuller/LakinFuller_pheno.csv", row.names=FALSE)
+
+
+```
+
+
+### phenotype data
+
+```{r pheno data, eval=FALSE}
+
+plot[]
+
+key = merge(plot, pheno, by.x="plot_id", by.y="entity_id", )
+write.csv(key, file="/Users/jpoland/htp/18ASH_AM-PANEL/KEY_18ASH-AM-PANEL_AWNS_20180711.csv" , row.names=FALSE)
+head(key)
+key[key$phenotype_value=='Awnless',1:10]
+
+unique(key$plot_name)
+
+sum(key$phenotype_value=='Awnless')
+
+dim(plot)
+
+key[key$plot_name=='TAM-401',]
+key[key$plot_name=='OK101',]
+
+
+key.m = merge(key[key$rep==1,], key[key$rep==2,], by='plot_name', all=TRUE)
+head(key.m)
+
+key.m[key.m$phenotype_value.x!=key.m$phenotype_value.y,]
+
+install.packages("magick")
+
+library(magick)
+
+str(magick::magick_config())
+
+```
+
+
+
+
+### image embedding data
+
+```{r embedding, eval=FALSE}
+
+img.plot = read.csv(file="/Users/jpoland/htp/18ASH_AM-PANEL/embedding/img_to_plot.csv")
+dim(img.plot)
+head(img.plot)
+
+dist = read.csv(file="/Users/jpoland/htp/18ASH_AM-PANEL/embedding/Dist.csv", header=FALSE)
+dim(dist)
+dist[1:10, 1:10]
+
+fvec = read.csv(file="/Users/jpoland/htp/18ASH_AM-PANEL/embedding/fvec.csv", header=FALSE)
+dim(fvec)
+fvec[1:10, 1:10]
+
+head(pheno)
+fvec.key = merge(img.plot, pheno, by.x='plot', by.y='entity_id')
+head(fvec.key)
+dim(fvec.key)
+
+fvec.key$awn01 = 0
+fvec.key$awn01[fvec.key$phenotype_value=='Awned']=1
+sum(fvec.key$awn01 == 1)
+hist(fvec.key$awn01)
+
+library(vioplot)
+t.test(fvec[,2], by=fvec.key$awn01)
+vioplot(fvec[,2], by=fvec.key$awn01)
+
+library(cluster)
+km = kmeans(fvec, centers=2)
+km$cluster
+
+cor.test(km$cluster, fvec.key$awn01)
+
+
+```
+
+
+
