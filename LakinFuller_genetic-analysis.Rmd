@@ -1,0 +1,1650 @@
+---
+title: "LakinFuller_genetic-analysis.RMD"
+output: html_document
+---
+
+```{r setup, eval=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+## clear workspace ##
+rm(list=ls())
+
+```
+
+
+
+### LOAD DATA
+```{r load-data, echo=TRUE}
+
+## best linear unbiased estimates calculated from mixed model (LakinFuller_htp-analysis.Rmd)
+load(file="/Users/jpoland/htp/17ASH_LakinFuller/LakinFuller_BLUEs.Rd") 
+dim(blues)
+
+```
+
+
+
+#### TEST FOR 2 gene dominant epistatis (e.g. 3:1 ratio from distribution)  ## using inflection point of 125 days as division
+```{r chi2-test, eval=TRUE}
+
+hist(blues$hd.vis, main="Heading Date", xlab="day of year (2017)", las=1, col='light grey' )
+## 2017 data ##
+
+
+early = sum(blues$hd.vis<125, na.rm=TRUE)
+late = sum(blues$hd.vis>125, na.rm=TRUE)
+
+csq = chisq.test(x=c(early, late), p=c(0.75,0.25))
+csq$statistic
+
+
+abline(v=125, lty=2)
+text(126, 60, bquote(chi[(3:1)]^2 == .(round(csq$statistic,2))), cex = 1.2, pos=4)
+text(126, 50, bquote(p-value == .(round(csq$p.value,2))), cex = 1.2, pos=4)
+
+
+```
+
+
+```{r r-qtl, eval=FALSE}
+require(qtl)
+
+
+
+
+```
+
+
+```{r install-packages, eval=FALSE}
+
+install.packages("gplots")
+install.packages("LDheatmap")
+install.packages("genetics")
+install.packages("ape")
+install.packages("EMMREML")
+install.packages("scatterplot3d")
+
+```
+
+
+```{r load-gapit, eval=FALSE}
+
+
+library(qtl)
+source("http://www.bioconductor.org/biocLite.R") 
+biocLite("multtest")
+
+library(multtest)
+library(gplots)
+library(LDheatmap)
+library(genetics)
+library(ape)
+library(EMMREML)
+library(scatterplot3d)
+library(compiler) #this library is already installed in R library("scatterplot3d")  #required for cmpfun
+
+library('MASS') # required for ginv
+
+source("http://www.zzlab.net/GAPIT/emma.txt")
+source("http://www.zzlab.net/GAPIT/gapit_functions.txt")
+
+source("http://zzlab.net/GAPIT/gapit_functions.txt")
+
+```
+
+
+
+
+
+## FUNCTION TO CHANGE FROM/TO NUMERIC CHROMOSOME
+```{r chr-number, echo=FALSE}
+
+## functions for changing 1A chromosomes to numeric and back ##
+
+getWheatChr = function(){
+  names = paste(rep(c(1:7),each=3),rep(c('A','B','D'),7), sep="")
+  return(names)
+}
+
+subChrA = function(c){
+  
+  ##chr = c('1A','1B','1D','2A','2B','2D','3A','3B','3D','4A','4B','4D','5A','5B','5D','6A','6B','6D','7A','7B','7D','UN')
+  chr = getWheatChr()
+  levels(c) = c(levels(c),1:length(chr))
+  for(i in 1:length(chr)){
+    c[c==chr[i]]=i
+  }
+  return(c)
+}
+
+
+subChr1 = function(c){
+  ##chr = c('1A','1B','1D','2A','2B','2D','3A','3B','3D','4A','4B','4D','5A','5B','5D','6A','6B','6D','7A','7B','7D','UN')
+  chr = getWheatChr()
+  
+  levels(c) = c(levels(c),1:length(c), chr)
+  for(i in 1:length(c)){
+    c[c==i]=chr[i]
+  }
+  return(c)
+}
+
+
+## FUNCTION TO GET COLOR FOR CHROMOSOME PLOTTING
+getChrColor = function(chr){
+  clr = array(data=NA, dim = length(chr))
+  clr[grepl("A", chr)]="red"
+  clr[grepl("B", chr)]="blue"
+  clr[grepl("D", chr)]="green"
+  clr[grepl("UN", chr)]="grey"
+  return(clr)
+}
+
+## GET CUMULATIVE POSITION FOR PLOTTING MANHATTAN PLOT
+getManhattanPos = function(pos){
+  pos2 = pos
+  for(i in 2:length(pos)){
+    if(pos[i]>pos[i-1]){
+      pos2[i] = pos2[i-1]+pos[i]-pos[i-1]
+    }
+    if(pos[i]<pos[i-1]){
+      pos2[i] = pos2[i-1]+10000
+    }
+  }
+
+  return(pos2)
+}
+
+getManhattanStartPos = function(pos, chr, sel.chr=NULL){
+  pos = getManhattanPos(pos)
+  res = data.frame(chr=unique(chr), start=NA)
+  if(!is.null(sel.chr)){
+    return(min(pos[chr==sel.chr]))
+  }
+  for(i in 1:length(res$chr)){
+    res$start[i] = min(pos[chr==res$chr[i]])
+  }
+  return(res)
+}
+
+
+getChrLabelPos = function(chr, pos){ 
+  pos = getManhattanPos(pos)
+  res = data.frame(chr=unique(chr), pos=NA)
+  for (i in 1: length(res$chr)){
+    res$pos[i]=(min(pos[chr==res$chr[i]]) + max(pos[chr==res$chr[i]]))/2
+  }
+  return(res)
+}
+
+getChrStartEndPos = function(chr, pos){ 
+  ##pos = getManhattanPos(pos)
+  ##res = data.frame(chr=unique(chr), pos.start=NA, pos.end=NA)
+  res = data.frame(chr=unique(chr), pos.start=0, pos.end=NA)
+  for (i in 1: length(res$chr)){
+    ##res$pos.start[i]=min(pos[chr==res$chr[i]])
+    res$pos.end[i]=max(pos[chr==res$chr[i]])
+  }
+  ##res$chr = paste('chr',res$chr, sep="")
+  return(res)
+}
+
+
+lmp <- function (modelobject) {
+    if (class(modelobject) != "lm") stop("Not an object of class 'lm' ")
+    f <- summary(modelobject)$fstatistic
+    p <- pf(f[1],f[2],f[3],lower.tail=F)
+    attributes(p) <- NULL
+    return(p)
+}
+
+
+lmb <- function (modelobject) {
+    if (class(modelobject) != "lm") stop("Not an object of class 'lm' ")
+    b = modelobject$coefficients[2]
+    attributes(b) = NULL
+    return(b)
+}
+
+
+getBonf = function(y){
+  bonf = -log10(0.05/sum(!is.na(y)))
+  return(bonf)
+}
+
+getMappingColor = function(y){
+   ## Bonferroni correction
+  bonf = getBonf(y)
+  clr = array(dim=length(y), data='gray')
+  clr[y>bonf]='red'
+  return(clr)
+}
+
+getMappingColorNA = function(y){
+   ## Bonferroni correction
+  bonf = getBonf(y)
+  clr = array(dim=length(y), data=NA)
+  clr[y>bonf]='red'
+  return(clr)
+}
+
+```
+
+
+
+
+
+
+```{r VCF, eval=FALSE}
+
+
+## get genotypes from VCF and filter
+
+library(vcfR)
+
+
+
+## read VCF to R object  ##read.vcfR(file, limit = 1e+07, nrows = -1, skip = 0, cols = NULL,convertNA = TRUE, verbose = TRUE)
+##vcf = read.vcfR(file="~/gbs/LakinFuller/LakinFuller_GBSv2_20171005.vcf")
+##vcf = read.vcfR(file="/Users/jpoland/gbs/LakinFuller/LaByRInth_masked_files_LF/LaByRInth_masked_01_filtered_lakin_fuller.vcf")
+##vcf= read.vcfR(file="/Users/jpoland/gbs/LakinFuller/LaByRInth_updated_results/LaByRInth_masked_01_filtered_lakin_fuller.vcf")
+
+vcf= read.vcfR(file="/Users/jpoland/gbs/LakinFuller/LB20-masked_01_LF-final-hom-filtered.vcf")
+
+
+## SOMETHING WRONG WITH THIS DATASET
+##vcf= read.vcfR(file="/Users/jpoland/gbs/LakinFuller/filtered_MAF0.1_Miss-lte30_Het-lte6-imputed-LF-final-hom-filtered.vcf")
+
+##vcf= read.vcfR(file="/Users/jpoland/gbs/LakinFuller/imputed-parents_homDiff_SNPs-at-least-1filter-passed.vcf")
+
+##vcf = read.vcfR(file="/Users/jpoland/Downloads/lakin_fuller_5_variant_LaByRInth.vcf")
+
+##vcf.df = INFO2df(vcf)
+##vcf.df$DP
+##head(vcf.df)
+##vcf.df$
+
+
+geno = data.frame(extract.gt(vcf))
+geno[1:10,1:10]
+head(geno)
+
+geno1 = data.frame(extract.gt(vcf, as.numeric=TRUE))
+geno1[geno1[]==0]=-1
+geno1[1:10,1:10]
+
+
+
+
+genoAT = extract.gt(vcf, return.alleles=TRUE)
+genoAT[1:10,1:10]
+
+##chr = extract.info(vcf, "POS")
+##vignette('vcf_data')
+##getFIX(vcf)
+chr = getCHROM(vcf)
+pos = getPOS(vcf)
+head(vcf)
+
+vcf_field_names(vcf)
+
+
+## visualize on of the RILs
+ril.col = getLineColor(geno1$U6202.088, geno1$LAKIN, geno1$FULLER)
+
+dev.off()
+plot(pos, subChrA(chr),  col = ril.col, pch="|", lwd=6)
+
+length(pos)
+
+
+
+
+
+
+
+pbinom()
+
+ad1 <- masplit(ad, record = 1, sort=FALSE)
+ad2 <- masplit(ad, record = 2, sort=FALSE)
+freq1 <- ad1/(ad1+ad2)
+freq2 <- ad2/(ad1+ad2)
+
+ad1[1:10,1:10]
+ad2[1:10,1:10]
+
+
+
+maf = data.frame(maf(vcf))
+hist(maf$Freq)
+head(maf)
+
+
+
+##call.het = function(x){
+##  return(sum(x, na.rm=TRUE) / sum(!is.na(x)))
+##}
+
+##geno.het = is.het(extract.gt(vcf), na_is_false = FALSE)
+##geno.het[1:10,1:10]
+
+
+##het = apply(geno.het, 1, call.het)
+##hist(het)
+
+
+
+##dim(geno.het)
+##call.het(geno.het[1,])
+
+##good = het<0.05 & maf$Freq>0.2
+##good = het<0.2 & maf$Freq>0.2
+##sum(good)
+
+
+#######################################################################
+
+## use filtered genotypes from VCF
+
+dim(geno1)
+geno1 = geno1[ ,!grepl('BLANK', colnames(geno1))]  ## remove blanks
+geno1 = geno1[order(colnames(geno1))] ## order geno1
+
+g = t(as.matrix(geno1))
+dim(g)
+g[1:20,1:10]
+is.data.frame(geno1)
+
+dim(blues)
+
+## join pheno and geno data
+##Y17 = blues[blues$entry %in% hap01$GT,]
+Y17 = blues[sub("-", ".", blues$entry) %in% colnames(geno1),]
+##sum(blues$entry %in% hap01$GT)
+dim(Y17)
+dim(g)
+dim(geno1)
+
+head(geno1)
+g[1:10,1:10]
+
+##Y17$phi3.vis[Y17$hd.vis>125]=NA
+##Y17$phi3.cnn[Y17$hd.cnn>125]=NA
+
+##res=hap01$GI
+
+## results dataframe for mapping, saving p-value for heading date (50% regession point) and phi3, and allele sub effect for HD 
+res = data.frame(chr=chr, pos=pos, hd.vis = NA,  hd.cnn = NA, phi3.vis = NA, phi3.cnn = NA, hd.vis.a = NA, hd.cnn.a = NA)
+dim(res)
+head(res)
+
+
+for(i in 1:nrow(res)){
+  ##p = lmp(lm(Y17$phi3.cnn ~ hap01$GD[,i]))
+  ##res$phi3.cnn[i]=p
+  if(!good[i]){next}
+  if(sum(g[,i], na.rm=TRUE)==0){next}
+  res$hd.cnn[i] = lmp(lm(Y17$hd.cnn ~ g[,i]))
+  res$hd.vis[i] = lmp(lm(Y17$hd.vis ~ g[,i]))
+  
+  res$hd.cnn.a[i] = lmb(lm(Y17$hd.cnn ~ g[,i]))
+  res$hd.vis.a[i] = lmb(lm(Y17$hd.vis ~ g[,i]))
+  
+  res$phi3.cnn[i] = lmp(lm(Y17$phi3.cnn ~ g[,i]))
+  res$phi3.vis[i] = lmp(lm(Y17$phi3.vis ~ g[,i]))
+  
+  if(i%%100==0){print(paste("Processing marker:", i))}
+}
+
+## results dataframe
+head(res)
+
+## make results data frame for plotting, convert to -log10 pvalue
+res.plot = res
+res.plot[,c(3:6)] = -log10(res.plot[,c(3:6)])
+head(res.plot)
+
+## quick look
+plot(res.plot$hd.vis)
+
+dev.off()
+plot(res.plot$phi3.cnn, col=getMappingColor(res.plot$phi3.cnn))
+plot(res.plot$phi3.vis, col=getMappingColor(res.plot$phi3.vis))
+
+
+
+##############################
+## TEST REMOVING LATE LINES ##
+
+Y17.early = Y17
+Y17.early$phi3.vis[Y17$hd.vis>125]=NA
+Y17.early$phi3.cnn[Y17$hd.cnn>125]=NA
+
+
+for(i in 1:nrow(res)){
+  ##p = lmp(lm(Y17$phi3.cnn ~ hap01$GD[,i]))
+  ##res$phi3.cnn[i]=p
+  if(!good[i]){next}
+  if(sum(g[,i], na.rm=TRUE)==0){next}
+
+  res$phi3.cnn[i] = lmp(lm(Y17.early$phi3.cnn ~ g[,i]))
+  res$phi3.vis[i] = lmp(lm(Y17.early$phi3.vis ~ g[,i]))
+  
+  if(i%%100==0){print(paste("Processing marker:", i))}
+}
+
+## results dataframe
+head(res)
+
+## make results data frame for plotting, convert to -log10 pvalue
+res.plot = res
+res.plot[,c(3:6)] = -log10(res.plot[,c(3:6)])
+head(res.plot)
+
+plot(res.plot$phi3.cnn, col=getMappingColor(res.plot$phi3.cnn))
+plot(res.plot$phi3.vis, col=getMappingColor(res.plot$phi3.vis))
+
+
+
+##############################
+## TEST LATE LINES -> REMOVING EARLY LINES ##
+
+Y17.late = Y17
+Y17.late$phi3.vis[Y17$hd.vis<125]=NA
+Y17.late$phi3.cnn[Y17$hd.cnn<125]=NA
+
+
+for(i in 1:nrow(res)){
+  ##p = lmp(lm(Y17$phi3.cnn ~ hap01$GD[,i]))
+  ##res$phi3.cnn[i]=p
+  if(!good[i]){next}
+  if(sum(g[,i], na.rm=TRUE)==0){next}
+
+  res$phi3.cnn[i] = lmp(lm(Y17.late$phi3.cnn ~ g[,i]))
+  res$phi3.vis[i] = lmp(lm(Y17.late$phi3.vis ~ g[,i]))
+  
+  if(i%%100==0){print(paste("Processing marker:", i))}
+}
+
+## results dataframe
+head(res)
+
+## make results data frame for plotting, convert to -log10 pvalue
+res.plot = res
+res.plot[,c(3:6)] = -log10(res.plot[,c(3:6)])
+head(res.plot)
+
+plot(res.plot$phi3.cnn, col=getMappingColor(res.plot$phi3.cnn))
+plot(res.plot$phi3.vis, col=getMappingColor(res.plot$phi3.vis)) 
+
+
+```
+
+
+
+
+
+```{r circos-plot, eval=FALSE}
+
+
+head(res)
+
+#####
+require(lme4)
+library(asreml)
+
+
+lm.marginP <- function (modelobject) {
+    if (class(modelobject) != "lm") stop("Not an object of class 'lm' ")
+    p <- summary(modelobject)$coeff["g[, i]:g[, j]","Pr(>|t|)"]
+    attributes(p) <- NULL
+    return(p)
+}
+
+## dataframe for interaction test results
+epi.res = data.frame(chr1=factor(levels=unique(factor(chr))), pos1=integer(), chr2=factor(levels=unique(factor(chr))), pos2=integer(), pval=double())
+head(epi.res)
+
+e.test = -log10(res$hd.cnn)>getBonf(res$hd.cnn) & !is.na(res$hd.cnn)
+sum(e.test) ## number of loci to test for interactions
+
+
+
+for(i in (1:length(e.test))[e.test]){
+  for(j in (1:length(e.test))[e.test]){
+    ##lm(Y17$hd.cnn ~ hap01$GD[,i]*hap01$GD[,j])
+    ##if(hap01$GI$Chromosome[i]==hap01$GI$Chromosome[j]){next}
+    if(j<i){next} ## skip reciprocal testing
+    if(chr[i]==chr[j]){next}
+    ##p = lmp(lm(Y17$hd.cnn ~ hap01$GD[,i]:hap01$GD[,j]))
+    p = lm.marginP(lm(Y17$hd.cnn ~ g[,i]*g[,j]))
+    epi.res = rbind(epi.res, data.frame(chr1=chr[i], pos1=pos[i], chr2=chr[j], pos2=pos[j], pval=-log10(p)))
+    
+    if(-log10(p)>4){
+      print(paste(chr[i], pos[i], chr[j], pos[j], -log10(p)))
+    }
+    
+  }
+}
+
+## Bonf. correction ##
+nrow(epi.res)
+
+epi.res = epi.res[epi.res$pval>getBonf(epi.res$pval),]
+nrow(epi.res)
+
+head(epi.res)
+
+min(epi.res$pval)
+max(epi.res$pval)
+
+
+
+########################################
+
+### make circos plot ###
+
+library(OmicCircos)
+options( stringsAsFactors = FALSE)
+
+
+## centromere positions ##
+chr.c = read.table("/Users/jpoland/genome/161013_centromere_positions_CS_plus_guess3B.bed")
+chr.c$V1 = sub("chr", "", chr.c$V1)
+
+## chromosome length ##
+chr.l = read.table("/Users/jpoland/genome/180223_CS_refseqv1.fasta.chrom.bed")
+chr.l$V1 = sub("chr", "", chr.l$V1)
+
+## make dataframe for circos ##
+cir.df = data.frame(chr=factor(levels=factor(getWheatChr())), start.pos=integer(), end.pos=integer(), the.v=character(), NO=character())
+
+for(c in getWheatChr()){
+  short = data.frame(chr=c, start.pos=0, end.pos=chr.c$V2[which(chr.c$V1==c)], the.v=NA, NO=NA )
+  long = data.frame(chr=c, start.pos=chr.c$V3[which(chr.c$V1==c)], end.pos=chr.l$V3[which(chr.l$V1==c)], the.v=NA, NO=NA )
+  cir.df = rbind(cir.df, short, long)
+}
+
+
+##wheat.circo = segAnglePo(data.frame(chr=chr,start.pos=pos,end.pos=pos, the.v=NA, NO=NA), seg=unique(chr))
+wheat.circo = segAnglePo(cir.df, seg=getWheatChr())
+
+head(res.plot)
+
+dev.off()
+par(mar=c(0,0,0,0))
+plot(c(1,800), c(1,800), type="n", axes=FALSE, xlab="", ylab="", main="");
+circos(R=300, type="chr", cir=wheat.circo, W=4, scale=FALSE, col=c("red","blue","green"), cex=1.2);
+
+circos(R=300, type="s", cir=wheat.circo, mapping=cent, col.v=2, W=1, B=FALSE, col='black', cex=0.3, scale=TRUE) ## map centromeres
+
+circos(R=200, type="s", cir=wheat.circo, mapping=res.plot, col.v=4, W=100, B=TRUE, col=getMappingColor(res.plot[,4]), cex=0.3, scale=TRUE)  ## map CNN results
+
+circos(R=200, type="s", cir=wheat.circo, mapping=res.plot, col.v=4, W=100, B=FALSE, col=getMappingColorNA(res.plot[,4]), cex=0.3, scale=TRUE)  ## re-map significant CNN results
+
+
+##circos(R=200, type="s", cir=wheat.circo, mapping=res.plot, col.v=4, W=100, B=TRUE, col=getMappingColor(res.plot[,4]), cex=0.3, scale=TRUE);
+
+
+##circos(R=200, type="s", cir=wheat.circo, mapping=res.plot, col.v=5, W=100, B=TRUE, col=getMappingColor(res.plot[,5]), cex=0.3, scale=TRUE)
+
+##plot(res.plot$phi3.cnn, col=getMappingColor(res.plot$phi3.cnn))
+
+
+genes = data.frame(chr=c('2B','2D','5B'), pos=c(56E6,33952048,573216880), label=c("Ppd-B1", "Ppd-D1", "PhyC"))   ### POSITION OF Ppd-B1 based on exchange with Rudi -> CS v1.0 annotation
+circos(R=310, cir=wheat.circo, type="label2", mapping=genes, W=20, side="out", B=FALSE, cex=0.6, col='blue');
+##circos(R=200, cir=wheat.circo, type="s2", mapping=genes, W=100, cex=0.6, col="white");
+##circos(R=310, cir=wheat.circo, type="label", mapping=genes, W=20, side="out", cex=0.6, col='blue');
+##circos(R=180, cir=wheat.circo, type="label", mapping=genes, W=100, side="in", cex=0.6, col='blue');
+
+
+## plot interactions ##
+epi.plot = cbind(epi.res[,c(1:2)], NA, epi.res[,-c(1:2)])
+epi.plot = epi.plot[order(epi.plot$pval),]
+epi.plot = epi.plot[epi.plot$chr1!='UN' & epi.plot$chr2!='UN',]
+circos(R=180, cir=wheat.circo, W=80, mapping=epi.plot, type="link", col=rainbow(n=max(epi.plot$pval))[epi.plot$pval], lwd=0.5*epi.plot$pval)
+
+
+## NOTE: save as 6'x6' PDF
+
+
+
+
+
+## extra stuff for Ppd-B1
+dev.off()
+plot(x=res.plot$pos[res.plot$chr=='2B']/1E6, y=res.plot$hd.cnn[res.plot$chr=='2B'], ylab='-log10(pval)', xlab='Chr.2B (Mb)')
+abline(v=c(33.8,56), col='red', lty=2)
+
+        
+which.max(res.plot$hd.cnn[res.plot$chr=='2B'])
+res.plot$pos[res.plot$chr=='2B'][131]
+
+
+dev.off()
+plot(x=res.plot$pos[res.plot$chr=='2D']/1E6, y=res.plot$hd.cnn[res.plot$chr=='2D'], ylab='-log10(pval)', xlab='Chr.2B (Mb)')
+abline(v=c(33.95), col='red', lty=2)
+
+
+res.plot$pos[res.plot$chr=='2D'][which.max(res.plot$hd.cnn[res.plot$chr=='2D'])]
+res.plot$pos[res.plot$chr=='2D'][res.plot$hd.cnn[res.plot$chr=='2D']>10]
+
+
+
+
+        plot(getManhattanPos(res$pos), -log10(res$hd.vis),  col=getChrColor(subChr1(res$chr)), cex=0.8, axes=FALSE, main="DAYS TO HEADING")
+        points(getManhattanPos(res$pos), -log10(res$hd.cnn),  col=getChrColor(subChr1(res$chr)), cex=0.8, pch=22)
+        axis(2, las=1)
+        mtext("-log10(p-value)", side=2, line=2)
+        text(x=getChrLabelPos(chr, pos)$pos, y=c(-1), labels=getChrLabelPos(chr, pos)$chr, font=2, cex=0.7)
+        legend(x=1.1E10, y=15, legend=c("Visual", "CNN"), pch=c(21,22), cex=1, bty='n', x.intersp=0.5, y.intersp=0.5)
+        
+        abline(h=-log10(0.05/sum(good)), col="red", lty=3)  ## Bonferroni correction
+        
+        abline(v=getManhattanStartPos(pos,chr, '2D')+33952048, lty=2) ## Ppd-D1
+        text(x=getManhattanStartPos(pos,chr, '2D')+33952048, y=15, label="Ppd-D1", pos=4) ## Ppd-D1
+        abline(v=getManhattanStartPos(pos,chr, '2B')+34000000, lty=2) ## Ppd-B1
+        text(x=getManhattanStartPos(pos,chr, '2B')+34000000, y=14, label="Ppd-B1", pos=2) ## Ppd-D1
+        
+        
+        
+        
+        
+        ## make manhattan plot for phi3 ##
+        
+        plot(getManhattanPos(res$pos), -log10(res$phi3.vis),  col=getChrColor(subChr1(res$chr)), cex=0.8, axes=FALSE, ylim=c(-0.5,15), main="phi3")
+        points(getManhattanPos(res$pos), -log10(res$phi3.cnn),  col=getChrColor(subChr1(res$chr)), cex=0.8, pch=22)
+        axis(2, las=1)
+        mtext("-log10(p-value)", side=2, line=2)
+        text(x=chr.lab$pos, y=c(-0.5), labels=chr.lab$chr, font=2, cex=0.7)
+        legend(x=1.1E10, y=15, legend=c("Visual", "CNN"), pch=c(21,22), cex=1, bty='n', x.intersp=0.5, y.intersp=0.5)
+        
+        abline(h=-log10(0.05/sum(good)), col="red", lty=3)  ## Bonferroni correction
+        
+        
+        abline(v=getManhattanStartPos(pos,chr, '2D')+33952048, lty=2) ## Ppd-D1
+        text(x=getManhattanStartPos(pos,chr, '2D')+33952048, y=15, label="Ppd-D1", pos=4) ## Ppd-D1
+        abline(v=getManhattanStartPos(pos,chr, '2B')+34000000, lty=2) ## Ppd-B1
+        text(x=getManhattanStartPos(pos,chr, '2B')+34000000, y=14, label="Ppd-B1", pos=2) ## Ppd-D1
+        
+        
+        
+        
+        
+        which(res$phi3.vis==min(res$phi3.vis))
+        
+        which.min(res$phi3.vis)
+        
+        
+        
+        
+        
+        epi.res[epi.res$pval == max(epi.res$pval), ]
+        
+        
+        ## interaction plot ##
+        
+        idx = which.max(epi.res$pval)
+        idx = which.max(epi.res$pval[epi.res$chr1=='1B'])
+        epi.res[idx, ]
+        
+        idx1 = which(pos==epi.res$pos1[idx])
+        idx2 = which(pos==epi.res$pos2[idx])
+        test = lm(Y17$hd.cnn ~ g[,idx1]*g[,idx2])
+        test = aov(Y17$hd.cnn ~ g[,idx1]*g[,idx2])
+        anova(test)
+        
+        
+        data = data.frame(cbind(Y17$hd.cnn, g[,idx1], g[,idx2]))
+        colnames(data)=c("pheno", "g1", "g2")
+        test = asreml(fixed= pheno ~ g1*g2, data=data, na.method.X='omit')
+        
+        
+        
+        test = lm(Y17$hd.cnn ~ g[,idx1]*g[,idx2])
+        sum.test = summary(test)
+        
+        test$coefficients[4]
+        (sum.test)
+        sum.test[[1]][["Pr(>F)"]]
+        
+        summary(test)[[1]][["Pr(>F)"]]
+        
+        unlist(summary(test))[grepl("Pr(>F)")]
+        
+        
+                    
+            m = 
+            summary(m)
+            
+            dev.off()
+            par(mar=c(4,4,2,3), xpd=TRUE)
+            par(las=1)
+            interaction.plot(x.factor=array(g[,idx1]), trace.factor=array(g[,idx2]), response=Y17$hd.cnn, type="o", pch=c(21,22), legend=FALSE, xlab="Ppd-D1", ylab="Heading Days")
+            ##mtext(label="Ppd-B1", x=2, y=122)
+            mtext(text="Ppd-B1", side=4)
+            
+            ##legend(x=1, y=128, legend=c("0","1"), title="Ppd-B1", lty=c(1,2), cex=1)
+            
+            ##legend(inset=c(-1,0), legend=c("0","1"), title="Ppd-B1", lty=c(1,2), cex=1)
+            
+            boxplot(Y17$hd.cnn ~ g[,idx1]*g[,idx2])
+            test = lm(Y17$hd.cnn ~ g[,idx1]*g[,idx2])
+            summary(test)
+            
+            Y=Y17$hd.cnn[!is.na(Y17$hd.cnn) & !is.na(g[,idx1]) & !is.na(g[,idx2])]
+            g1= g[,idx1][!is.na(Y17$hd.cnn) & !is.na(g[,idx1]) & !is.na(g[,idx2])]
+            g2= g[,idx2][!is.na(Y17$hd.cnn) & !is.na(g[,idx1]) & !is.na(g[,idx2])]
+            ##interaction.plot(x.factor=g[,idx1], trace.factor=g[,idx2], response=Y17$hd.cnn, type="b", pch=21, legend=FALSE, xlab="Ppd-D1")
+            interaction.plot(x.factor=g1, trace.factor=g2, response=Y, type="b", pch=c(21,22), legend=FALSE, xlab="Ppd-D1",ylim=c(min(Y),max(Y)))
+            points(g1[g2==0], Y[g2==0])
+            
+            g1= g1==1
+            g2= g2==1
+
+
+########################
+
+            ## INTERACTION PLOTS ##
+            off=0.15 ## offset
+            par(mar=c(5,5,5,5))
+            plot(NA, xlim=c(-1.3,1.3), ylim=c(min(Y), max(Y)),  type="n", axes=FALSE, xlab="", ylab="", main="");
+            axis(side=2, las=2); mtext("Heading Date", side=2, line=3)
+            
+            vioplot(Y[g1&g2], Y[!g1&g2],col='lightgreen' , wex=0.3, at=c(-1,1)-off, add=TRUE)  ## add contrast alleles for g1 with g2
+            vioplot(Y[!g1&!g2],Y[g1&!g2], col='lightblue' , wex=0.3, at=c(-1,1)+off, add=TRUE) ## add constrast alleles for g1 without g2
+            
+            points(c(-1,1)-off, c(median(Y[g1&g2]),median(Y[!g1&g2])), type='l') ## add trend line
+            points(c(-1,1)+off, c(median(Y[!g1&!g2]),median(Y[g1&!g2])), type='l')
+            
+            ##text(x=c(0,0), y=c(114,130), labels=c("Ppd-D1+","Ppd-D1-"), col=c('lightgreen','lightblue'), font=2)
+            mtext(at=c(114,130), side=4, line=0.5, las=1, text=c("Ppd-D1+","Ppd-D1-"), col=c('lightgreen','lightblue'), font=2)
+            mtext(at=c(-1,1), side=1, line=0.5, las=1, text=c("1B-qtl+","1B-qtl-"), col='black', font=2)
+            
+
+
+
+            
+            ######################
+            ## INTERACTION PLOT for Ppd-D1 & Ppd-B1 ##
+            idx = which.max(epi.res$pval)
+            epi.res[idx, ]
+            
+            idx1 = which(pos==epi.res$pos1[idx])
+            idx2 = which(pos==epi.res$pos2[idx])
+            test = lm(Y17$hd.cnn ~ g[,idx1]*g[,idx2])
+            anova(test)
+            
+            
+            Y=Y17$hd.cnn[!is.na(Y17$hd.cnn) & !is.na(g[,idx1]) & !is.na(g[,idx2])]
+            g1= g[,idx1][!is.na(Y17$hd.cnn) & !is.na(g[,idx1]) & !is.na(g[,idx2])]
+            g2= g[,idx2][!is.na(Y17$hd.cnn) & !is.na(g[,idx1]) & !is.na(g[,idx2])]
+            
+            g1= g1==1 ## turn to boolean array
+            g2= g2==1
+            
+            ## INTERACTION PLOTS ##
+            off=0.15 ## offset
+            par(mar=c(5,5,5,5))
+            plot(NA, xlim=c(-1.3,1.3), ylim=c(min(Y), max(Y)),  type="n", axes=FALSE, xlab="", ylab="", main="");
+            axis(side=2, las=2); mtext("Heading Date", side=2, line=3)
+            
+            vioplot(Y[!g1&!g2], Y[!g1&g2],col='lightgreen' , wex=0.3, at=c(-1,1)-off, add=TRUE)  ## add contrast alleles for g1 with g2
+            vioplot(Y[g1&!g2],Y[g1&g2], col='lightblue' , wex=0.3, at=c(-1,1)+off, add=TRUE) ## add constrast alleles for g1 without g2
+            
+            points(c(-1,1)-off, c(median(Y[!g1&!g2]),median(Y[!g1&g2])), type='l') ## add trend line
+            points(c(-1,1)+off, c(median(Y[g1&!g2]),median(Y[g1&g2])), type='l')
+            
+            ##text(x=c(0,0), y=c(114,130), labels=c("Ppd-D1+","Ppd-D1-"), col=c('lightgreen','lightblue'), font=2)
+            mtext(at=c(114,130), side=4, line=0.5, las=1, text=c("Ppd-D1+","Ppd-D1-"), col=c('lightgreen','lightblue'), font=2)
+            mtext(at=c(-1,1), side=1, line=0.5, las=1, text=c("Ppd-B1+","Ppd-B1-"), col='black', font=2)
+            
+            
+
+
+
+#######################
+## 3-way interaction ##
+
+#######################
+## INTERACTION PLOT for Ppd-D1 & Ppd-B1 and 1B qtl ##
+
+idx = which.max(epi.res$pval) ## get index of strongest interaction
+epi.res[idx, ]
+
+
+idx.2B = which(pos==epi.res$pos1[idx])
+idx.2D = which(pos==epi.res$pos2[idx])
+
+idx = which.max(epi.res$pval[epi.res$chr1=='1B']) ## get index of 1B interaction
+idx.1B = which(pos==epi.res$pos1[idx]) 
+
+epi.res[idx, ]
+
+
+## clean up date for graph  ## remove all missing
+Y=Y17$hd.cnn[!is.na(Y17$hd.cnn) & !is.na(g[,idx.2D]) & !is.na(g[,idx.2B]) & !is.na(g[,idx.1B])]
+g.2B= g[,idx.2B][!is.na(Y17$hd.cnn) & !is.na(g[,idx.2D]) & !is.na(g[,idx.2B]) & !is.na(g[,idx.1B])]
+g.2D = g[,idx.2D][!is.na(Y17$hd.cnn) & !is.na(g[,idx.2D]) & !is.na(g[,idx.2B]) & !is.na(g[,idx.1B])]
+g.1B = g[,idx.1B][!is.na(Y17$hd.cnn) & !is.na(g[,idx.2D]) & !is.na(g[,idx.2B]) & !is.na(g[,idx.1B])]
+
+
+g2B= g.2B==1 ## turn to boolean array
+g2D= g.2D==1
+g1B= g.1B==1
+
+test = lm(Y~g.2B*g.2D)
+test = lm(Y~g.1B*g.2B*g.2D)
+anova(test)
+
+summary(test)
+
+
+
+
+## INTERACTION PLOTS ##
+library(vioplot)
+dev.off()
+off=0.25; off2=off*2 ## offset
+par(mar=c(8,4,2,2))
+plot(NA, xlim=c(-2,2), ylim=c(min(Y), max(Y)),  type="n", axes=FALSE, xlab="", ylab="", main="");
+axis(side=2, las=2, font=2); mtext("Heading (day of year)", side=2, line=3)
+
+vioplot(Y[!g2B&!g2D&g1B], Y[!g2B&g2D&g1B],col='red' , wex=0.3, at=c(-1,1)+off2, add=TRUE)  ## add contrast alleles for g2B with g2D
+vioplot(Y[!g2B&!g2D&!g1B],Y[!g2B&g2D&!g1B], col='darkred' , wex=0.3, at=c(-1,1)+off, add=TRUE) ## add constrast alleles for g2B without g2D
+
+vioplot(Y[g2B&!g2D&g1B], Y[g2B&g2D&g1B],col='lightblue' , wex=0.3, at=c(-1,1)-off, add=TRUE)  ## add contrast alleles for g2B with g2D
+vioplot(Y[g2B&!g2D&!g1B],Y[g2B&g2D&!g1B], col='darkblue' , wex=0.3, at=c(-1,1)-off2, add=TRUE) ## add constrast alleles for g2B without g2D
+
+##points(c(-1,1)-off, c(median(Y[!g2B&!g2D]),median(Y[!g2B&g2D])), type='l') ## add trend line
+##points(c(-1,1)+off, c(median(Y[g2B&!g2D]),median(Y[g2B&g2D])), type='l')
+
+##text(x=c(0,0), y=c(114,130), labels=c("Ppd-D1+","Ppd-D1-"), col=c('lightgreen','lightblue'), font=2)
+##mtext(at=c(114,130), side=4, line=0.5, las=1, text=c("Ppd-D1+","Ppd-D1-"), col=c('lightgreen','lightblue'), font=2)
+##mtext(at=c(-1,1), side=1, line=0.5, las=1, text=c("Ppd-B1+","Ppd-B1-"), col='black', font=2)
+
+mtext(at=c(-1,1), side=1, line=4, las=1, text=c("Ppd-D1+","Ppd-D1-"), col='black', cex=1.2, font=2)
+
+mtext(at=c(-1,1)-(off+off2)/2, side=1, line=2, las=1, text=c("PpD-B1+"), col='black', cex=0.8, font=2)
+mtext(at=c(-1,1)+(off+off2)/2, side=1, line=2, las=1, text=c("PpD-B1-"), col='black', cex=0.8, font=2)
+
+mtext(at=c(-1,1)-off, side=1, line=0.2, las=1, text=c("1B-"), col='black', cex=0.8, font=2)
+mtext(at=c(-1,1)+off2, side=1, line=0.2, las=1, text=c("1B-"), col='black', cex=0.8, font=2)
+mtext(at=c(-1,1)-off2, side=1, line=0.2, las=1, text=c("1B+"), col='black', cex=0.8, font=2)
+mtext(at=c(-1,1)+off, side=1, line=0.2, las=1, text=c("1B+"), col='black', cex=0.8, font=2)
+
+
+
+
+interaction.plot(x.factor=g2B, trace.factor=g1B, response=Y, type="b", pch=c(21,22), legend=FALSE,ylim=c(min(Y),max(Y)))
+
+
+
+
+
+
+
+
+dev.off()
+plot(Y17$hd.cnn ~ g[,idx1]:g[,idx2])
+
+sum(g[,idx1]==0 & g[,idx2]==1, na.rm=TRUE)
+
+
+interaction.plot(x.factor, trace.factor, response, fun = mean,
+                 type = c("l", "p", "b", "o", "c"), legend = TRUE,
+                 trace.label = deparse(substitute(trace.factor)),
+                 fixed = FALSE,
+                 xlab = deparse(substitute(x.factor)),
+                 ylab = ylabel,
+                 ylim = range(cells, na.rm = TRUE),
+                 lty = nc:1, col = 1, pch = c(1:9, 0, letters),
+                 xpd = NULL, leg.bg = par("bg"), leg.bty = "n",
+                 xtick = FALSE, xaxt = par("xaxt"), axes = TRUE,
+                 ...)
+
+dev.off()
+require(vioplot)
+
+
+
+plot(Y17$hd.cnn , g[,idx1]*g[,idx2])
+plot(lm(Y17$hd.cnn ~ g[,idx1]*g[,idx2]))
+
+split(Y17$hd.cnn, f=g[,idx2])
+vioplot()
+
+
+
+epi.res.plot = merge(merge(epi.res, getManhattanStartPos(pos,chr), by.x='chr1', by.y='chr'), getManhattanStartPos(pos,chr), by.x='chr2', by.y='chr')
+head(epi.res.plot)
+
+plot(epi.res.plot$start.x+epi.res.plot$pos1, epi.res.plot$start.y+epi.res.plot$pos2, cex=epi.res$pval/10, xlim=c(0,max(getManhattanPos(pos))), ylim=c(0,max(getManhattanPos(pos))), axes=FALSE)
+
+abline(v=getManhattanStartPos(pos,chr, '2D')+33952048, lty=2) ## Ppd-D1
+abline(v=getManhattanStartPos(pos,chr, '2B')+35000000, lty=2) ## Ppd-B1
+
+abline(h=getManhattanStartPos(pos,chr, '2D')+33952048, lty=2) ## Ppd-D1
+abline(h=getManhattanStartPos(pos,chr, '2B')+35000000, lty=2) ## Ppd-B1
+abline(a=0, b=1, lwd=3) ## Ppd-B1
+
+
+
+
+
+
+
+
+
+
+### make a combined plot ###
+
+dev.off()
+
+layout(matrix(c(1,2,3,4), 2, 2, byrow = TRUE), widths=c(1,3), heights=c(1,3))
+par(mar = c(0,0,0,0))
+plot(0, type='n',axes=FALSE,ann=FALSE)
+
+
+plot(getManhattanPos(res$pos), -log10(res$hd.vis),  col=getChrColor(subChr1(res$chr)), cex=0.5, axes=FALSE)
+points(getManhattanPos(res$pos), -log10(res$hd.cnn),  col=getChrColor(subChr1(res$chr)), cex=0.5, pch=22)
+axis(2, las=1)
+mtext("-log10(p-value)", side=2, line=2, cex=0.8)
+
+abline(h=-log10(0.05/sum(good)), col="red")  ## Bonferroni correction
+
+text(x=chr.lab$pos, y=c(-0.5), labels=chr.lab$chr, font=2, cex=0.7)
+
+abline(v=getManhattanStartPos(pos,chr, '2D')+33952048, lty=2) ## Ppd-D1
+abline(v=getManhattanStartPos(pos,chr, '2B')+35000000, lty=2) ## Ppd-B1
+
+
+##plot(log10(res$hd.vis), getManhattanPos(res$pos), col=getChrColor(subChr1(res$chr)), cex=0.5, xaxt='n')
+
+##length(res$hd.cnn.a)
+##length(geno1$LAKIN)
+parent.a = res$hd.cnn.a*geno1$LAKIN
+parent.a[res$hd.cnn > 0.05/sum(good)]=NA
+parent.b = res$hd.cnn.a*-geno1$FULLER
+parent.b[-log10(res$hd.cnn)<3]=NA
+plot(parent.a, getManhattanPos(res$pos),  col=getChrColor(subChr1(res$chr)), cex=1, axes=FALSE)
+points(getManhattanPos(res$pos), parent.b,  col=getChrColor(subChr1(res$chr)), cex=1)
+
+axis(3)
+mtext("Allele Sub Effect", line=2, cex=0.7, font=1)
+
+abline(h=getManhattanStartPos(pos,chr, '2D')+33952048, lty=2) ## Ppd-D1
+abline(h=getManhattanStartPos(pos,chr, '2B')+34000000, lty=2) ## Ppd-B1
+abline(v=0)
+
+##points(getManhattanPos(res$pos), array(0, dim=length(pos)),  col=getChrColor(subChr1(res$chr)), cex=0.5)
+
+##abline(h=-log10(0.05/nrow(res)), col="red")
+
+
+
+plot(-log10(res$hd.vis),  getManhattanPos(res$pos), col=getChrColor(subChr1(res$chr)), cex=0.5, axes=FALSE)
+points(-log10(res$hd.cnn), getManhattanPos(res$pos),  col=getChrColor(subChr1(res$chr)), cex=0.5, pch=22)
+axis(2, las=1)
+mtext("-log10(p-value)", side=2, line=2)
+
+abline(v=-log10(0.05/sum(good)), col="red")  ## Bonferroni correction
+
+text(x=chr.lab$pos, y=c(-0.5), labels=chr.lab$chr, font=2, cex=0.7)
+
+abline(h=getManhattanStartPos(pos,chr, '2D')+33952048, lty=2) ## Ppd-D1
+abline(h=getManhattanStartPos(pos,chr, '2B')+34000000, lty=2) ## Ppd-B1
+
+
+
+
+##plot(getManhattanPos(res$pos), -log10(res$phi3.vis),  col=getChrColor(subChr1(res$chr)), cex=0.5, ylim=c(0,10))
+##points(getManhattanPos(res$pos), -log10(res$phi3.cnn),  col=getChrColor(subChr1(res$chr)), cex=0.5, pch=22)
+
+##abline(h=getManhattanStartPos(pos,chr, '2D')+33952048, lty=2) ## Ppd-D1
+##abline(h=getManhattanStartPos(pos,chr, '2B')+35000000, lty=2) ## Ppd-B1
+
+
+##abline(h=-log10(0.05/nrow(res)), col="red")
+abline(h=-log10(0.05/sum(good)), col="red")
+
+chr.lab = getChrLabelPos(subChr1(res$chr), res$pos)
+
+
+
+
+plot(epi.res.plot$start.x+epi.res.plot$pos1, epi.res.plot$start.y+epi.res.plot$pos2, cex=epi.res$pval/10, xlim=c(0,max(getManhattanPos(pos))), ylim=c(0,max(getManhattanPos(pos))), axes=FALSE)
+
+abline(v=getManhattanStartPos(pos,chr, '2D')+33952048, lty=2) ## Ppd-D1
+abline(v=getManhattanStartPos(pos,chr, '2B')+35000000, lty=2) ## Ppd-B1
+
+abline(h=getManhattanStartPos(pos,chr, '2D')+33952048, lty=2) ## Ppd-D1
+abline(h=getManhattanStartPos(pos,chr, '2B')+35000000, lty=2) ## Ppd-B1
+##abline(a=0, b=1, lwd=3)
+
+
+
+
+
+
+
+
+
+
+
+plot()
+
+[1] "1238 2689 0.462994857567522"
+[1] "1238 2690 0.589263076537233"
+[1] "1238 2691 10.3738508649299"
+[1] "1238 2692 7.14271828069471"
+
+i=1238
+j=2692
+j=j+1
+
+cor.test(hap01$GD[,i],hap01$GD[,j])
+
+lmp(lm(Y17$hd.cnn ~ hap01$GD[,i]:hap01$GD[,j]))
+i=2772
+j=3260
+res$hd.cnn[i]
+res$hd.cnn[j]
+
+
+points(-log10(res$phi3.vis), cex=0.5, col='red')
+points(-log10(res$phi3.cnn), cex=0.5, col=getChrColor(hap01$GI$Chromosome))
+plot(-log10(res$hd.cnn), cex=0.5, col=getChrColor(hap$chrom))
+
+lab=array(unique(hap$chrom))
+par(mfrow=c(3,7), mar=c(1,1,1,1))
+for(i in unique(hap01$GI$Chromosome)){
+  if(i==22){next}
+  pt = res$hd.vis[hap01$GI$Chromosome==i]
+  pos = hap01$GI$Position[hap01$GI$Chromosome==i]
+  plot(pos,-log10(pt), xlim=c(0,max(hap01$GI$Position)), ylim=c(0,40), main=lab[i])
+  
+  points(pos,-log10(pt))
+  abline(h=-log10(0.05/nrow(res)), col="red")
+  ##text(x=4E8, y=35, labels=lab[i])
+}
+
+for()
+
+
+list(unique(hap$chrom))
+  
+
+max(hap01$GI$Position)
+i=1
+9E8
+  
+
+LF.gapit <- GAPIT( Y=Y17, G=hap, PCA.total=3 )
+
+LF.gapit
+
+
+
+myY <- read.table("/Users/jpoland/Downloads/GAPIT_Tutorial_Data/mdp_traits.txt", head = TRUE)
+myG <- read.table("/Users/jpoland/Downloads/GAPIT_Tutorial_Data/mdp_genotype_test.hmp.txt" , head = FALSE)
+#Step 2: Run GAPIT 
+myGAPIT <- GAPIT( Y=myY, G=myG, PCA.total=3 )
+
+gapit.LF <- GAPIT( Y=Y17, G=hap, PCA.total=3 )
+
+summary(myGAPIT)
+myGAPIT$GWAS
+
+hap = hap[hap$LAKIN != hap$FULLER,]
+head(hap)
+
+hap01 = hap
+hap01[ ,12:ncol(hap)]=NA
+head(hap01)
+
+hap01[hap=='N']='N'
+hap01[hap]
+
+sum(hap01=='N', na.rm = TRUE)
+dim(hap01)
+
+
+
+
+```
+
+```{r genome-predict, eval=FALSE}
+library(rrBLUP)
+library(bWGR)
+
+ wgr(y,X,it=1500,bi=500,th=1,bag=1,rp=FALSE,iv=FALSE,de=FALSE,pi=0,df=5,R2=0.5,eigK=NULL,VarK=0.95,verb=FALSE)
+ 
+##LF.wgr = wgr(y=Y17$day, X=hap01$GD, it=1500, bi=500, th=1, bag=1, rp=FALSE, iv=TRUE, de=FALSE, pi=0.9, df=5, R2=0.5, eigK=NULL, VarK=0.95, verb=TRUE)
+ 
+## BayesA
+LF.wgr = wgr(y=Y17$phi3.vis , X=g, it=1500, bi=500, iv=TRUE, pi=0.01, verb=TRUE)
+
+
+
+## BayesL
+##LF.wgr = wgr(y=Y17$day, X=g, it=1500, bi=500, iv=FALSE, pi=0.01, verb=TRUE)
+
+plot(Y17$phi3.vis,LF.wgr$hat)
+cor(Y17$phi3.vis, LF.wgr$hat, use='complete')
+
+idx = sample(1:nrow(Y17), 50, replace=FALSE)
+Y17.NA = Y17
+Y17.NA[idx,]=NA
+
+LF.wgr = wgr(y=Y17.NA$phi3.vis , X=g, it=1500, bi=500, iv=TRUE, pi=0.01, verb=TRUE)
+
+plot(Y17$phi3.vis[idx], LF.wgr$hat[idx])
+cor(Y17$phi3.vis[idx], LF.wgr$hat[idx], use='complete')
+
+
+LF.bayesA = wgr(y=Y17.NA$phi3.vis , X=g, it=1500, bi=500, iv=TRUE, pi=0, verb=TRUE)
+
+plot(Y17$phi3.vis[idx], LF.bayesA$hat[idx])
+cor(Y17$phi3.vis[idx], LF.bayesA$hat[idx], use='complete')
+
+
+LF.bayesB = wgr(y=Y17.NA$phi3.vis , X=g, it=1500, bi=500, pi=0.95, verb=TRUE)
+
+plot(Y17$phi3.vis[idx], LF.bayesB$hat[idx])
+cor(Y17$phi3.vis[idx], LF.bayesB$hat[idx], use='complete')
+
+
+LF.brr = wgr(y=Y17.NA$phi3.vis , X=g, it=1500, bi=500, iv=FALSE, pi=0, verb=TRUE)
+
+plot(Y17$phi3.vis[idx], LF.brr$hat[idx])
+cor(Y17$phi3.vis[idx], LF.brr$hat[idx], use='complete')
+
+
+LF.bayesC = wgr(y=Y17.NA$phi3.vis , X=g, it=1500, bi=500, iv=FALSE, pi=0.95, verb=TRUE)
+
+plot(Y17$phi3.vis[idx], LF.bayesC$hat[idx])
+cor(Y17$phi3.vis[idx], LF.bayesC$hat[idx], use='complete')
+
+LF.bayesL = wgr(y=Y17.NA$phi3.vis , X=g, it=1500, bi=500, de=TRUE, verb=TRUE)
+
+plot(Y17$phi3.vis[idx], LF.bayesL$hat[idx])
+cor(Y17$phi3.vis[idx], LF.bayesL$hat[idx], use='complete')
+
+
+
+
+    # BLUP
+    BRR = wgr(y,gen,iv=FALSE,pi=0,it=200,bi=50)
+    cor(y,BRR$hat)
+    # BayesA
+    BayesA = wgr(y,gen,iv=TRUE,pi=0,it=200,bi=50)
+    cor(y,BayesA$hat)
+    # BayesB
+    BayesB = wgr(y,gen,iv=TRUE,pi=.95,it=200,bi=50)
+    cor(y,BayesB$hat)
+    # BayesC
+    BayesC = wgr(y,gen,iv=FALSE,pi=.95,it=200,bi=50)
+    cor(y,BayesC$hat)
+    # BayesL
+    BayesL = wgr(y,gen,de=TRUE,it=200,bi=50)
+    cor(y,BayesL$hat)
+    # Bagging BLUP
+    Bag = wgr(y,gen,bag=0.5,it=200,bi=50)
+    cor(y,Bag$hat)
+
+
+rrBLUP()  
+
+GWAS(pheno, geno, fixed=NULL, K=NULL, n.PC=0, min.MAF=0.05, n.core=1, P3D=TRUE, plot=TRUE)
+
+colnames(geno1)=gsub('[.]','-',colnames(geno1))
+geno1[1:10,1:10]
+
+gwas.geno = data.frame(marker=row.names(geno1),chr=chr, pos=pos)
+gwas.geno = cbind(gwas.geno, geno1)
+colnames(gwas.geno)=gsub('[.]','-',colnames(gwas.geno))
+gwas.geno[1:10,1:10]
+
+LF.gwas = GWAS(pheno=Y17, geno=gwas.geno, fixed=NULL, K=NULL, n.PC=0, min.MAF=0.05, n.core=1, P3D=TRUE, plot=TRUE)
+
+
+LF.a = A.mat(X=t(geno1), min.MAF=NULL, max.missing=NULL, impute.method="mean", tol=0.02, n.core=2, shrink=FALSE, return.imputed=FALSE)
+
+LF.blup = kin.blup(data=data.frame(entry=Y17$entry, phi3.vis=Y17$phi3.vis), geno='entry', pheno='phi3.vis', GAUSS=FALSE, K=LF.a, fixed=NULL, covariate=NULL, PEV=FALSE, n.core=2, theta.seq=NULL)
+
+plot(Y17$phi3.vis, LF.blup$pred)
+cor.test(Y17$phi3.vis, LF.blup$pred)
+
+data.frame(entry=Y17$entry, phi3.vis=Y17$phi3.vis, t(geno1))[1:10,1:10]
+
+
+LF.rr =  mixed.solve(y=Y17$phi3.vis, Z=g, K=NULL, X=NULL, method="REML", bounds=c(1e-09, 1e+09), SE=FALSE, return.Hinv=FALSE)
+
+head(Y17)
+g[1:10, 1:10]
+dim(g)
+
+ 
+idx = sample(1:nrow(Y17), 50, replace=FALSE)
+Y17.NA = Y17
+Y17.NA[idx,]=NA
+
+Y17.pred = Y17
+Y17.pred[,2:5] = NA
+  
+phi3.brr.pred = array(data=NA, dim=c(nrow(Y17),1))
+
+
+LF.a = A.mat(X=t(geno1), min.MAF=NULL, max.missing=NULL, impute.method="mean", tol=0.02, n.core=2, shrink=FALSE, return.imputed=FALSE)
+LF.dist = dist(t(geno1))
+
+LF.blup = kin.blup(data=data.frame(entry=Y17$entry, phi3.vis=Y17$phi3.vis), geno='entry', pheno='phi3.vis', GAUSS=FALSE, K=LF.a, fixed=NULL, covariate=NULL, PEV=FALSE, n.core=2, theta.seq=NULL)
+plot(Y17$phi3.vis, LF.blup$pred)
+cor.test(Y17$phi3.vis, LF.blup$pred)
+
+LF.gauss = kin.blup(data=data.frame(entry=Y17$entry, phi3.vis=Y17$phi3.vis), geno='entry', pheno='phi3.vis', GAUSS=TRUE, K=LF.dist, fixed=NULL, covariate=NULL, PEV=FALSE, n.core=2, theta.seq=NULL)
+plot(Y17$phi3.vis, LF.gauss$pred)
+
+
+
+
+
+##pred = array(data=NA, dim=c(100,1))
+pred = array(data=NA, dim=c(nrow(phi3.pred),1))
+
+##for(i in 1:nrow(phi3.pred)){
+for(i in 1:length(pred)){
+  idx = sample(1:nrow(Y17), 30, replace=FALSE)
+  ##idx=i
+  Y17.NA = Y17
+  Y17.NA[idx,]=NA
+  
+  ##LF.bayesA = wgr(y=Y17.NA$phi3.vis , X=g, it=1500, bi=500, iv=TRUE, pi=0, verb=TRUE)
+  ##p = wgr(y=Y17.NA$phi3.vis , X=g, it=1500, bi=500, iv=FALSE, pi=0, verb=TRUE)
+  ##c = cor.test(Y17$phi3.vis[idx], p$hat[idx])
+
+  ##plot(Y17$phi3.vis[idx], LF.bayesA$hat[idx])
+  ##c = cor(Y17$phi3.vis[idx], LF.bayesA$hat[idx], use='complete')
+  ##print(c)
+  
+  ##phi3.brr.pred[i]=LF.bayesA$hat[i]
+  ##print(paste(Y17$entry[i],": ", LF.bayesA$hat[i]))
+  
+  ##LF.blup = kin.blup(data=data.frame(entry=Y17$entry, phi3.vis=Y17.NA$phi3.vis), geno='entry', pheno='phi3.vis', GAUSS=FALSE, K=LF.a, fixed=NULL, covariate=NULL, PEV=FALSE, n.core=2, theta.seq=NULL)
+  ##p = kin.blup(data=data.frame(entry=Y17$entry, phi3.vis=Y17.NA$phi3.vis), geno='entry', pheno='phi3.vis', GAUSS=TRUE, K=LF.dist, fixed=NULL, covariate=NULL, PEV=FALSE, n.core=2, theta.seq=NULL)
+  ##c = cor.test(Y17$phi3.vis[idx], p$pred[idx])
+  
+  p = kin.blup(data=data.frame(entry=Y17$entry, phi3.cnn=Y17.NA$phi3.cnn), geno='entry', pheno='phi3.cnn', GAUSS=TRUE, K=LF.dist, fixed=NULL, covariate=NULL, PEV=FALSE, n.core=2, theta.seq=NULL)
+  c = cor.test(Y17$phi3.cnn[idx], p$pred[idx])
+
+  
+  
+  ##c = cor.test(Y17$phi3.vis[idx], LF.brr$hat[idx])
+  ##phi3.brr.pred[i]=c$estimate
+  
+  
+  pred[i] = c$estimate
+  print(paste("interation:",i,": ", c$estimate))
+  print(mean(pred, na.rm=TRUE))
+  
+  ##pred[i] = p$pred[idx]
+  ##print(paste(Y17$entry[i],": ", pred[i]))
+
+  
+  
+}   
+
+c = mean(pred)
+
+mean(phi3.blup.pred)
+
+phi3.bayesA.pred = phi3.pred
+
+plot(Y17$phi3.vis, phi3.bayesA.pred)
+c = cor.test(Y17$phi3.vis, pred)$estimate
+
+## get predictive ability NOTE: must run asreml analysis first for getH2 function
+c
+c/sqrt(getH2(asreml.phi3.cnn))
+
+mean(phi3.pred)
+
+
+
+hist(Y17$phi3.vis)
+
+dev.off()
+
+###############################################
+## RANDOM FOREST ##
+
+
+library(randomForest)
+
+randomForest(x, y=NULL,  xtest=NULL, ytest=NULL, ntree=500,
+                 mtry=if (!is.null(y) && !is.factor(y))
+                 max(floor(ncol(x)/3), 1) else floor(sqrt(ncol(x))),
+                 replace=TRUE, classwt=NULL, cutoff, strata,
+                 sampsize = if (replace) nrow(x) else ceiling(.632*nrow(x)),
+                 nodesize = if (!is.null(y) && !is.factor(y)) 5 else 1,
+                 maxnodes = NULL,
+                 importance=FALSE, localImp=FALSE, nPerm=1,
+                 proximity, oob.prox=proximity,
+                 norm.votes=TRUE, do.trace=FALSE,
+                 keep.forest=!is.null(y) && is.null(xtest), corr.bias=FALSE,
+                 keep.inbag=FALSE, ...)
+
+
+idx = sample(1:nrow(Y17), 200, replace=FALSE)
+y = if(is.na(Y17[idx,]))
+
+Y17.NA = Y17
+Y17.NA[idx,]=NA
+
+Y17.pred = Y17
+Y17.pred[,2:5] = NA
+
+y
+
+dim(g)
+g[1:10,1:10]
+g[is.na(g)]==0
+
+LF.randomforest = randomForest(y=Y17.NA$phi3.vis[1:150] , x=g[1:150, ])
+
+plot(Y17$phi3.vis[idx], LF.bayesL$hat[idx])
+cor(Y17$phi3.vis[idx], LF.bayesL$hat[idx], use='complete')
+
+
+
+```
+
+
+
+
+
+
+
+
+
+```{r r-qtl, eval=FALSE}
+library(qtl)
+source("http://www.bioconductor.org/biocLite.R") 
+biocLite("multtest")
+
+install.packages("gplots")
+install.packages("LDheatmap")
+install.packages("genetics")
+install.packages("ape")
+install.packages("EMMREML")
+install.packages("scatterplot3d")
+
+library(multtest)
+library(gplots)
+library(LDheatmap)
+library(genetics)
+library(ape)
+library(EMMREML)
+library(scatterplot3d)
+library(compiler) #this library is already installed in R library("scatterplot3d")
+
+library('MASS') # required for ginv
+library(multtest)
+library(gplots)
+library(compiler) #required for cmpfun
+library("scatterplot3d")
+
+source("http://www.zzlab.net/GAPIT/emma.txt")
+source("http://www.zzlab.net/GAPIT/gapit_functions.txt")
+
+source("http://zzlab.net/GAPIT/gapit_functions.txt")
+
+hap = read.table(file="/Users/jpoland/gbs/LakinFuller/LakinFuller_GBSv2_20170612v2_IMPUTE-PARENT_IMPUTE.hap.txt", check.names=FALSE, comment.char="", header=FALSE)
+##hap = hap[,!grepl("BLANK", colnames(hap))] ## remove blank wells
+hap = hap[,!grepl("BLANK", hap[1,])] ## remove blank wells
+##hap = read.table("/Users/jpoland/gbs/LakinFuller/LakinFuller_GBSv2_20170612v2_IMPUTE-PARENT_IMPUTE.hap.txt", head=FALSE)
+hap$V3 = subChrA(hap$V3)
+
+hap01 = GAPIT.HapMap(hap)
+hap01$GT
+dim(hap01$GD)
+
+hap01$GD[1:50, 1:50]
+hap[12:21, 12:21]
+hap01$GI
+
+
+Y17 = cbind.data.frame(BLUP.day.Y17$plot_name, BLUP.day.Y17$predicted.value)
+colnames(Y17)=c("Taxa","day")
+
+
+myY <- read.table("/Users/jpoland/Downloads/GAPIT_Tutorial_Data/mdp_traits.txt", head = TRUE)
+myG <- read.table("/Users/jpoland/Downloads/GAPIT_Tutorial_Data/mdp_genotype_test.hmp.txt" , head = FALSE)
+#Step 2: Run GAPIT 
+##myGAPIT <- GAPIT( Y=myY, G=myG, PCA.total=3 )
+
+gapit.LF <- GAPIT( Y=Y17, G=hap, PCA.total=3, sangwich.top = "MLM", sangwich.bottom = "CMLM")
+
+summary(myGAPIT)
+myGAPIT$GWAS
+
+hap = hap[hap$LAKIN != hap$FULLER,]
+head(hap)
+
+hap01 = hap
+hap01[ ,12:ncol(hap)]=NA
+head(hap01)
+
+hap01[hap=='N']='N'
+hap01[hap]
+
+sum(hap01=='N', na.rm = TRUE)
+dim(hap01)
+
+
+
+
+```
+
+
+```{r BGLR, eval=FALSE}
+
+## Bayesian Linear Regression using blr package ##
+## NOTE: NEED TO HAVE THE GAPIT FUNCTIONS LOADED FROM ABOVE ##
+
+library(BGLR)
+source("http://zzlab.net/GAPIT/gapit_functions.txt")
+
+## BGLR(y, response_type = "gaussian", a=NULL, b=NULL,ETA = NULL, nIter = 1500,burnIn = 500, thin = 5, saveAt = "", S0 = NULL,df0 =5, R2 = 0.5, weights = NULL,verbose = TRUE, rmExistingFiles = TRUE, groups=NULL)
+
+hap = read.table(file="/Users/jpoland/gbs/LakinFuller/LakinFuller_GBSv2_20170612v2_FILTER_20170717.hmp.txt", check.names=FALSE, comment.char="", header=FALSE)
+hap = hap[,!grepl("BLANK", apply(hap[1,], 2, as.character)) ] ## remove blank wells  
+
+##hap = read.table("/Users/jpoland/gbs/LakinFuller/LakinFuller_GBSv2_20170612v2_IMPUTE-PARENT_IMPUTE.hap.txt", head=FALSE)
+hap01 = GAPIT.HapMap(hap)
+hap01$GT
+
+hap01$GD[1:50, 1:50]
+hap[1:21, 1:21]
+hap01$GI
+
+Y17 = cbind.data.frame(BLUP.day.Y17$plot_name, BLUP.day.Y17$predicted.value)
+colnames(Y17)=c("Taxa","day")
+
+dim(Y17)
+dim(hap01$GD)
+hap01$GD = hap01$GD-1
+
+
+idx = match(Y17$Taxa, hap01$GT, nomatch=0)
+Y17 = Y17[idx,]
+
+dim(Y17)
+dim(hap01$GD)
+hap01mm = t(hap01$GD) %*% hap01$GD
+hap01mm = hap01
+tmp.GD = matrix(nrow=nrow(hap01$GD), ncol=ncol(hap01$GD)^2)
+dim(tmp.GD)
+m = ncol(hap01$GD)
+for(i in 1:m){
+  for(j in 1:m){
+    tmp.GD[ ,i+(j-1)*m] = hap01$GD[,i]*hap01$GD[,j]
+  }
+}
+
+
+j=2
+i=1
+
+tmp.GD = cbind(hap01$GD, tmp.GD)
+
+## save some files for Pancho
+##save(hap01, file="/Users/jpoland/htp/17ASH_LakinFuller/LF-genotypes.Rd")
+##write.csv(Y17, file="/Users/jpoland/htp/17ASH_LakinFuller/LF-trait.csv" )
+
+dim(hap01mm)
+
+LF17.bayesB = BGLR(Y17$day, ETA = list(list(X=hap01$GD, model="BayesCpi")), nIter = 5000, burnIn = 1000, thin = 2, saveAt = "", S0 = NULL,df0 =5, R2 = 0.5,verbose = TRUE)
+summary(LF17.bayesB)
+
+LF17.bayesC = BGLR(Y17$day, ETA = list(list(X=hap01$GD, model="BayesC", probIn=0.01)), nIter = 5000, burnIn = 1000, thin = 5, saveAt = "", S0 = NULL,df0 =5, R2 = 0.5, verbose = TRUE)
+summary(LF17.bayesC)
+
+plot(LF17.bayesC$ETA[[1]]$b^2, lwd=2, col=getChrColor(hap01$GI$Chromosome))
+
+
+LF17.bayesC.e = BGLR(Y17$day, ETA = list(list(X=tmp.GD, model="BayesC", probIn=0.01)), nIter = 5000, burnIn = 1000, thin = 5, saveAt = "", S0 = NULL,df0 =5, R2 = 0.5, verbose = TRUE)
+summary(LF17.bayesC)
+
+plot(LF17.bayesC$y, LF17.bayesC$yHat)
+cor.test(LF17.bayesC$y, LF17.bayesC$yHat)
+
+plot(LF17.bayesC$ETA[[1]]$b^2, lwd=2)
+
+demo(BayesCpi)
+
+plot(LF17.bayesB$y, LF17.bayesB$yHat)
+
+
+plot(LF17.bayesB$ETA[[1]]$b^2, lwd=2)
+
+
+
+LF.blr = BLR(y=Y17$day, XL=hap01$GD, nIter=5500,burnIn=500,thin=1,saveAt="example_", prior=list(varE=list(df=3,S=0.25), varU=list(df=3,S=0.63), lambda=list(shape=0.52,rate=1e-4, type='random' ,value=30)))
+
+summary(LF.blr)
+
+#BayesB
+    demo(BB)
+
+
+
+plot(LF.blr$bL, col=clr)
+
+
+
+## BayesA and BayesCpi
+
+library(bWGR)
+
+ wgr(y,X,it=1500,bi=500,th=1,bag=1,rp=FALSE,iv=FALSE,de=FALSE,
+        pi=0,df=5,R2=0.5,eigK=NULL,VarK=0.95,verb=FALSE)
+ 
+ LF.wgr = wgr(y=Y17$day, X=hap01$GD, it=1500, bi=500, th=1, bag=1, rp=FALSE, iv=TRUE, de=FALSE, pi=0.9, df=5, R2=0.5, eigK=NULL, VarK=0.95, verb=TRUE)
+ 
+ ## BayesA
+LF.wgr = wgr(y=Y17$day, X=hap01$GD, it=1500, bi=500, iv=TRUE, pi=0.01, verb=TRUE)
+
+## BayesL
+LF.wgr = wgr(y=Y17$day, X=hap01$GD, it=1500, bi=500, iv=FALSE, pi=0.01, verb=TRUE)
+
+plot(Y17$day,LF.wgr$hat)
+cor(Y17$day,LF.wgr$hat)
+
+hist(hap01$GD)
+
+summary(hap01)
+  plot(LF.wgr$b)
+ summary(LF.wgr)
+ LF.wgr$hat
+ 
+ dim(hap01$GD)
+ 
+ data(tpod)
+ BayesA = wgr(y,gen,iv=TRUE,pi=0,it=200,bi=50)
+    cor(y,BayesA$hat)
+ 
+    hist(gen)
+
+as.data.frame(cbind(hap01$GI,)
+    
+    
+library(rrBLUP)
+
+    GWAS(pheno, geno, fixed=NULL, K=NULL, n.PC=0, min.MAF=0.05, n.core=1, P3D=TRUE, plot=TRUE)
+  
+
+LF.gwas = GWAS(Y17, geno=cbind(), fixed=NULL, K=NULL, n.PC=0, min.MAF=0.05, n.core=1, P3D=TRUE, plot=TRUE)
+    
+
+head(geno1)
+length(pos)    
+
+
+
+## EXTRA CODE ##
+
+
+BLR(y, XF, XR, XL, GF, prior, nIter, burnIn, thin,thin2,saveAt,
+      minAbsBeta,weights)
+
+
+
+if(FALSE){
+    rm(list=ls())
+    library(BLR)
+    data(wheat)     #Loads the wheat dataset
+    y=Y[,1]
+    ### Creates a testing set with 100 observations
+    whichNa<-sample(1:length(y),size=100,replace=FALSE)
+    yNa<-y
+    yNa[whichNa]<-NA
+    ### Runs the Gibbs sampler
+    fm<-BLR(y=yNa,XL=X,GF=list(ID=1:nrow(A),A=A), prior=list(varE=list(df=3,S=0.25), varU=list(df=3,S=0.63), lambda=list(shape=0.52,rate=1e-4, type='random' ,value=30)), nIter=5500,burnIn=500,thin=1,saveAt="example_")
+    
+MSE.tst<-mean((fm$yHat[whichNa]-y[whichNa])^2)
+MSE.tst
+MSE.trn<-mean((fm$yHat[-whichNa]-y[-whichNa])^2)
+MSE.trn
+COR.tst<-cor(fm$yHat[whichNa],y[whichNa])
+COR.tst
+COR.trn<-cor(fm$yHat[-whichNa],y[-whichNa])
+COR.trn
+plot(fm$yHat~y,xlab="Phenotype",
+     ylab="Pred. Gen. Value" ,cex=.8)
+points(x=y[whichNa],y=fm$yHat[whichNa],col=2,cex=.8,pch=19)
+x11()
+plot(scan( example_varE.dat ),type="o",
+        ylab=expression(paste(sigma[epsilon]^2)))
+}
+
+
+plot(fm$bL)
+
+
+
+
+```
+
+
+
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
